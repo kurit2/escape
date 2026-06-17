@@ -1,0 +1,6 @@
+{
+  "name": "ヤンデレ刃物回避ゲーム",
+  "description": "ヤンデレの女の子が投げてくる刃物を避けながら、会話イベントをこなして好感度100を目指すサバイバル回避アクションゲーム。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
