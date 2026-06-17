@@ -68,6 +68,7 @@ export default function App() {
   const isDraggingPlayerRef = useRef<boolean>(false);
   
   const knivesRef = useRef<Knife[]>([]);
+  const resumeDelayRef = useRef<number>(0);
   const particlesRef = useRef<{
     x: number;
     y: number;
@@ -134,6 +135,7 @@ export default function App() {
   // Safe initialize sound
   const handleInteractionSoundInit = () => {
     sound.setMuted(isMuted);
+    sound.unlockAudio();
   };
 
   // Get reactive subtitle based on affection
@@ -181,6 +183,7 @@ export default function App() {
     lastSpawnTimeRef.current = 0;
     dialogueTimerRef.current = 10.0;
     autoAffectionTimerRef.current = 10.0;
+    resumeDelayRef.current = 0;
     currentLevelRef.current = 1;
     currentAffectionRef.current = 0;
 
@@ -232,9 +235,17 @@ export default function App() {
     }
 
     // Apply affection change
-    const newAff = Math.max(0, currentAffectionRef.current + option.value);
+    const newAff = Math.min(100, Math.max(0, currentAffectionRef.current + option.value));
     currentAffectionRef.current = newAff;
     setCurrentAffection(newAff);
+
+    // 好感度が100になった瞬間にクリアにするため、会話イベントがこれ以上進行しないよう即時クリア遷移
+    if (newAff >= 100) {
+      sound.playClear();
+      saveScoreRecord(true);
+      setGameStatus('clear');
+      return;
+    }
 
     // Show response details
     setDialogueResponse({
@@ -273,6 +284,7 @@ export default function App() {
     // Clear old knives to give a refreshing break for the new level
     knivesRef.current = [];
     dialogueTimerRef.current = 10.0;
+    resumeDelayRef.current = 2.0;
     setGameStatus('playing');
   };
 
@@ -410,250 +422,288 @@ export default function App() {
         return;
       }
 
-      // 1. Update Game Timers
-      timeSurvivedRef.current += dt;
-      setTimeSurvived(Math.floor(timeSurvivedRef.current));
+      // 会話再開時の2秒間の静止バッファ
+      if (resumeDelayRef.current > 0) {
+        resumeDelayRef.current -= dt;
 
-      dialogueTimerRef.current -= dt;
-      autoAffectionTimerRef.current -= dt;
+        // プレイヤーの操作による移動のみを許可（準備・微調整用）
+        if (controlMode === 'keyboard') {
+          let dx = 0;
+          let dy = 0;
+          if (keysPressed.current['ArrowLeft'] || keysPressed.current['KeyA']) dx -= 1;
+          if (keysPressed.current['ArrowRight'] || keysPressed.current['KeyD']) dx += 1;
+          if (keysPressed.current['ArrowUp'] || keysPressed.current['KeyW']) dy -= 1;
+          if (keysPressed.current['ArrowDown'] || keysPressed.current['KeyS']) dy += 1;
 
-      // Every 10 seconds: +1 affection automatically
-      if (autoAffectionTimerRef.current <= 0) {
-        autoAffectionTimerRef.current = 10.0;
-        const autoAff = Math.min(100, currentAffectionRef.current + 1);
-        currentAffectionRef.current = autoAff;
-        setCurrentAffection(autoAff);
-        // Play visual confirmation floating tiny heart
-        spawnParticles(player.x, player.y - player.radius, 1, 'heart', ['#f43f5e']);
+          if (dx !== 0 && dy !== 0) {
+            dx *= 0.7071;
+            dy *= 0.7071;
+          }
 
-        if (autoAff >= 100) {
-          sound.playClear();
-          saveScoreRecord(true);
-          setGameStatus('clear');
+          player.x += dx * player.speed;
+          player.y += dy * player.speed;
+        } else {
+          const targetX = mousePosRef.current.x;
+          const targetY = mousePosRef.current.y;
+          
+          player.x += (targetX - player.x) * 0.25;
+          player.y += (targetY - player.y) * 0.25;
+        }
+
+        player.x = Math.max(player.radius, Math.min(canvasWidth - player.radius, player.x));
+        player.y = Math.max(player.radius, Math.min(canvasHeight - player.radius, player.y));
+
+        // ウェイト中の刃物のスポーンタイマーのギャップを防ぐため、lastSpawnTimeRefを押し進める
+        lastSpawnTimeRef.current += dt * 1000;
+
+      } else {
+        // 通常のゲーム進行処理
+
+        // 1. Update Game Timers
+        timeSurvivedRef.current += dt;
+        setTimeSurvived(Math.floor(timeSurvivedRef.current));
+
+        dialogueTimerRef.current -= dt;
+        autoAffectionTimerRef.current -= dt;
+
+        // Every 10 seconds: +1 affection automatically
+        if (autoAffectionTimerRef.current <= 0) {
+          autoAffectionTimerRef.current = 10.0;
+          const autoAff = Math.min(100, currentAffectionRef.current + 1);
+          currentAffectionRef.current = autoAff;
+          setCurrentAffection(autoAff);
+          // Play visual confirmation floating tiny heart
+          spawnParticles(player.x, player.y - player.radius, 1, 'heart', ['#f43f5e']);
+
+          if (autoAff >= 100) {
+            sound.playClear();
+            saveScoreRecord(true);
+            setGameStatus('clear');
+            return;
+          }
+        }
+
+        // Every 10 seconds: trigger dialogue event
+        if (dialogueTimerRef.current <= 0) {
+          // Trigger event
+          cancelAnimationFrame(animId);
+          triggerDialogue();
           return;
         }
-      }
 
-      // Every 10 seconds: trigger dialogue event
-      if (dialogueTimerRef.current <= 0) {
-        // Trigger event
-        cancelAnimationFrame(animId);
-        triggerDialogue();
-        return;
-      }
+        // 2. Player Controls Position Logic
+        if (controlMode === 'keyboard') {
+          let dx = 0;
+          let dy = 0;
+          if (keysPressed.current['ArrowLeft'] || keysPressed.current['KeyA']) dx -= 1;
+          if (keysPressed.current['ArrowRight'] || keysPressed.current['KeyD']) dx += 1;
+          if (keysPressed.current['ArrowUp'] || keysPressed.current['KeyW']) dy -= 1;
+          if (keysPressed.current['ArrowDown'] || keysPressed.current['KeyS']) dy += 1;
 
-      // 2. Player Controls Position Logic
-      if (controlMode === 'keyboard') {
-        let dx = 0;
-        let dy = 0;
-        if (keysPressed.current['ArrowLeft'] || keysPressed.current['KeyA']) dx -= 1;
-        if (keysPressed.current['ArrowRight'] || keysPressed.current['KeyD']) dx += 1;
-        if (keysPressed.current['ArrowUp'] || keysPressed.current['KeyW']) dy -= 1;
-        if (keysPressed.current['ArrowDown'] || keysPressed.current['KeyS']) dy += 1;
-
-        if (dx !== 0 && dy !== 0) {
-          // Normalize speed diagonal movement
-          dx *= 0.7071;
-          dy *= 0.7071;
-        }
-
-        player.x += dx * player.speed;
-        player.y += dy * player.speed;
-      } else {
-        // Mouse follow/drag
-        // We use smooth interpolating follow
-        const targetX = mousePosRef.current.x;
-        const targetY = mousePosRef.current.y;
-        
-        player.x += (targetX - player.x) * 0.25;
-        player.y += (targetY - player.y) * 0.25;
-      }
-
-      // Clamp player into canvas bounds
-      player.x = Math.max(player.radius, Math.min(canvasWidth - player.radius, player.x));
-      player.y = Math.max(player.radius, Math.min(canvasHeight - player.radius, player.y));
-
-      // Leave a tiny trace particles trail behind the player's heart
-      if (Math.random() < 0.3) {
-        particlesRef.current.push({
-          x: player.x,
-          y: player.y + 4,
-          vx: (Math.random() - 0.5) * 0.5,
-          vy: Math.random() * 0.5 + 0.5,
-          size: Math.random() * 4 + 3,
-          alpha: 0.5,
-          color: 'rgba(244, 63, 94, 0.4)',
-          type: 'circle',
-          decay: 0.04
-        });
-      }
-
-      // 3. Spawning Knives Logic based on Level
-      const level = currentLevelRef.current;
-      const speedFactor = 1.0 + level * 0.15;
-      // 刃物の最大数を2倍に増加
-      const maxKnives = (3 + Math.floor(level * 1.2)) * 2;
-      // 出現頻度を2倍にするため、出現間隔(spawnInterval)をこれまでの半分に短縮
-      const spawnInterval = Math.max(0.16, (1.25 - level * 0.09) / 2) * 1000; 
-
-      if (timestamp - lastSpawnTimeRef.current > spawnInterval && knivesRef.current.length < maxKnives) {
-        lastSpawnTimeRef.current = timestamp;
-
-        // Visual alert swoosh audio
-        sound.playSwoosh();
-
-        // Roll knife types based on Level
-        let type: 'falling' | 'homing' | 'bouncing' | 'expanding' = 'falling';
-        if (level >= 4 && Math.random() < 0.25) {
-          type = 'homing';
-        } else if (level >= 7 && Math.random() < 0.3) {
-          type = 'bouncing';
-        } else if (level >= 9 && Math.random() < 0.2) {
-          type = 'expanding';
-        }
-
-        const size = type === 'expanding' ? 36 : 26; // Much larger sizes from 22/15 to 36/26 for dramatic visibility
-        const x = Math.random() * (canvasWidth - 40) + 20;
-        const y = -25;
-        
-        // Calculate initial velocities
-        let vx = (Math.random() - 0.5) * 1.5;
-        let vy = (Math.random() * 2 + 2) * speedFactor;
-
-        if (type === 'homing') {
-          // Homing targets player position! Needs high threat
-          const angle = Math.atan2(player.y - y, player.x - x);
-          const speed = (Math.random() * 1.5 + 3.0) * speedFactor;
-          vx = Math.cos(angle) * speed;
-          vy = Math.sin(angle) * speed;
-        }
-
-        knivesRef.current.push({
-          id: Math.random(),
-          x,
-          y,
-          vx,
-          vy,
-          angle: Math.atan2(vy, vx) + Math.PI / 2, // point to motion direction
-          rotationSpeed: type === 'bouncing' ? 0.08 : 0, // Bouncing knives spin!
-          speed: Math.hypot(vx, vy),
-          type,
-          size
-        });
-      }
-
-      // 4. Update Projectiles (Knives)
-      for (let i = knivesRef.current.length - 1; i >= 0; i--) {
-        const k = knivesRef.current[i];
-        
-        // Update physics
-        if (k.type === 'bouncing') {
-          k.x += k.vx;
-          k.y += k.vy;
-          k.angle += k.rotationSpeed; // Spinniness!
-          
-          // Bounce off side borders
-          if (k.x - k.size < 0 || k.x + k.size > canvasWidth) {
-            k.vx = -k.vx;
-            sound.playSwoosh(); // Sound bounce
-            spawnParticles(k.x, k.y, 4, 'star', ['#94a3b8', '#cbd5e1']);
+          if (dx !== 0 && dy !== 0) {
+            // Normalize speed diagonal movement
+            dx *= 0.7071;
+            dy *= 0.7071;
           }
-          // Bounce off bottom once
-          if (k.y + k.size > canvasHeight) {
-            k.vy = -Math.abs(k.vy) * 0.85; // lose some speed
-            k.y = canvasHeight - k.size - 2;
-            sound.playSwoosh();
-            spawnParticles(k.x, k.y, 4, 'star', ['#94a3b8', '#cbd5e1']);
-          }
-        } else if (k.type === 'expanding') {
-          // Slowly moves down, then splits!
-          k.x += k.vx;
-          k.y += k.vy;
-          k.angle += 0.02;
 
-          // Split check after passing half-point height
-          if (k.y > 180 && k.type === 'expanding') {
-            // Explode into 4 tiny needles going cardinal directions!
-            const needleSpeed = 4.5 * speedFactor;
-            const needleDirections = [
-              { vx: 0, vy: -needleSpeed }, // up
-              { vx: 0, vy: needleSpeed },  // down
-              { vx: -needleSpeed, vy: 0 }, // left
-              { vx: needleSpeed, vy: 0 }   // right
-            ];
-
-            needleDirections.forEach((dir) => {
-              knivesRef.current.push({
-                id: Math.random(),
-                x: k.x,
-                y: k.y,
-                vx: dir.vx,
-                vy: dir.vy,
-                angle: Math.atan2(dir.vy, dir.vx) + Math.PI / 2,
-                rotationSpeed: 0,
-                speed: needleSpeed,
-                type: 'needle',
-                size: 14, // Increased from 8 to 14 for visibility
-                color: '#ef4444', // vibrant red warning needles
-                glow: true
-              });
-            });
-
-            // Play shatter synth sound
-            sound.playSwoosh();
-            // Spawn explosion shards
-            spawnParticles(k.x, k.y, 10, 'star', ['#ef4444', '#fecdd3', '#e11d48']);
-            
-            // Remove the parent expanding knife
-            knivesRef.current.splice(i, 1);
-            continue;
-          }
+          player.x += dx * player.speed;
+          player.y += dy * player.speed;
         } else {
-          // Standard falling & homing
-          k.x += k.vx;
-          k.y += k.vy;
+          // Mouse follow/drag
+          // We use smooth interpolating follow
+          const targetX = mousePosRef.current.x;
+          const targetY = mousePosRef.current.y;
+          
+          player.x += (targetX - player.x) * 0.25;
+          player.y += (targetY - player.y) * 0.25;
         }
 
-        // Leave tiny glitters or smoke trails behind knives
-        if (Math.random() < 0.15) {
+        // Clamp player into canvas bounds
+        player.x = Math.max(player.radius, Math.min(canvasWidth - player.radius, player.x));
+        player.y = Math.max(player.radius, Math.min(canvasHeight - player.radius, player.y));
+
+        // Leave a tiny trace particles trail behind the player's heart
+        if (Math.random() < 0.3) {
           particlesRef.current.push({
-            x: k.x,
-            y: k.y,
-            vx: -k.vx * 0.1,
-            vy: -k.vy * 0.1,
-            size: Math.random() * 2 + 1,
-            alpha: 0.6,
-            color: k.glow ? 'rgba(239, 68, 68, 0.5)' : 'rgba(148, 163, 184, 0.4)',
+            x: player.x,
+            y: player.y + 4,
+            vx: (Math.random() - 0.5) * 0.5,
+            vy: Math.random() * 0.5 + 0.5,
+            size: Math.random() * 4 + 3,
+            alpha: 0.5,
+            color: 'rgba(244, 63, 94, 0.4)',
             type: 'circle',
-            decay: 0.05
+            decay: 0.04
           });
         }
 
-        // Remove out-of-screen knives
-        if (k.y > canvasHeight + 40 || k.y < -60 || k.x < -40 || k.x > canvasWidth + 40) {
-          knivesRef.current.splice(i, 1);
-          continue;
+        // 3. Spawning Knives Logic based on Level
+        const level = currentLevelRef.current;
+        const speedFactor = 1.0 + level * 0.15;
+        // 刃物の最大数を2倍に増加
+        const maxKnives = (3 + Math.floor(level * 1.2)) * 2;
+        // 出現頻度を2倍にするため、出現間隔(spawnInterval)をこれまでの半分に短縮
+        const spawnInterval = Math.max(0.16, (1.25 - level * 0.09) / 2) * 1000; 
+
+        if (timestamp - lastSpawnTimeRef.current > spawnInterval && knivesRef.current.length < maxKnives) {
+          lastSpawnTimeRef.current = timestamp;
+
+          // Visual alert swoosh audio
+          sound.playSwoosh();
+
+          // Roll knife types based on Level
+          let type: 'falling' | 'homing' | 'bouncing' | 'expanding' = 'falling';
+          if (level >= 4 && Math.random() < 0.25) {
+            type = 'homing';
+          } else if (level >= 7 && Math.random() < 0.3) {
+            type = 'bouncing';
+          } else if (level >= 9 && Math.random() < 0.2) {
+            type = 'expanding';
+          }
+
+          const size = type === 'expanding' ? 36 : 26; // Much larger sizes from 22/15 to 36/26 for dramatic visibility
+          const x = Math.random() * (canvasWidth - 40) + 20;
+          const y = -25;
+          
+          // Calculate initial velocities
+          let vx = (Math.random() - 0.5) * 1.5;
+          let vy = (Math.random() * 2 + 2) * speedFactor;
+
+          if (type === 'homing') {
+            // Homing targets player position! Needs high threat
+            const angle = Math.atan2(player.y - y, player.x - x);
+            const speed = (Math.random() * 1.5 + 3.0) * speedFactor;
+            vx = Math.cos(angle) * speed;
+            vy = Math.sin(angle) * speed;
+          }
+
+          knivesRef.current.push({
+            id: Math.random(),
+            x,
+            y,
+            vx,
+            vy,
+            angle: Math.atan2(vy, vx) + Math.PI / 2, // point to motion direction
+            rotationSpeed: type === 'bouncing' ? 0.08 : 0, // Bouncing knives spin!
+            speed: Math.hypot(vx, vy),
+            type,
+            size
+          });
         }
 
-        // 5. Collision Check (Small precise player hitbox!)
-        const distToPlayer = Math.hypot(k.x - player.x, k.y - player.y);
-        const collisionRadius = player.hitRadius + (k.size * 0.6); // slight hit box scale padding
-        if (distToPlayer < collisionRadius) {
-          // Hit! Game Over triggered!
-          cancelAnimationFrame(animId);
-          triggerGameOver();
-          return;
-        }
-      }
+        // 4. Update Projectiles (Knives)
+        for (let i = knivesRef.current.length - 1; i >= 0; i--) {
+          const k = knivesRef.current[i];
+          
+          // Update physics
+          if (k.type === 'bouncing') {
+            k.x += k.vx;
+            k.y += k.vy;
+            k.angle += k.rotationSpeed; // Spinniness!
+            
+            // Bounce off side borders
+            if (k.x - k.size < 0 || k.x + k.size > canvasWidth) {
+              k.vx = -k.vx;
+              sound.playSwoosh(); // Sound bounce
+              spawnParticles(k.x, k.y, 4, 'star', ['#94a3b8', '#cbd5e1']);
+            }
+            // Bounce off bottom once
+            if (k.y + k.size > canvasHeight) {
+              k.vy = -Math.abs(k.vy) * 0.85; // lose some speed
+              k.y = canvasHeight - k.size - 2;
+              sound.playSwoosh();
+              spawnParticles(k.x, k.y, 4, 'star', ['#94a3b8', '#cbd5e1']);
+            }
+          } else if (k.type === 'expanding') {
+            // Slowly moves down, then splits!
+            k.x += k.vx;
+            k.y += k.vy;
+            k.angle += 0.02;
 
-      // 6. Update Particles
-      for (let i = particlesRef.current.length - 1; i >= 0; i--) {
-        const p = particlesRef.current[i];
-        p.x += p.vx;
-        p.y += p.vy;
-        p.alpha -= p.decay;
-        if (p.alpha <= 0) {
-          particlesRef.current.splice(i, 1);
+            // Split check after passing half-point height
+            if (k.y > 180 && k.type === 'expanding') {
+              // Explode into 4 tiny needles going cardinal directions!
+              const needleSpeed = 4.5 * speedFactor;
+              const needleDirections = [
+                { vx: 0, vy: -needleSpeed }, // up
+                { vx: 0, vy: needleSpeed },  // down
+                { vx: -needleSpeed, vy: 0 }, // left
+                { vx: needleSpeed, vy: 0 }   // right
+              ];
+
+              needleDirections.forEach((dir) => {
+                knivesRef.current.push({
+                  id: Math.random(),
+                  x: k.x,
+                  y: k.y,
+                  vx: dir.vx,
+                  vy: dir.vy,
+                  angle: Math.atan2(dir.vy, dir.vx) + Math.PI / 2,
+                  rotationSpeed: 0,
+                  speed: needleSpeed,
+                  type: 'needle',
+                  size: 14, // Increased from 8 to 14 for visibility
+                  color: '#ef4444', // vibrant red warning needles
+                  glow: true
+                });
+              });
+
+              // Play shatter synth sound
+              sound.playSwoosh();
+              // Spawn explosion shards
+              spawnParticles(k.x, k.y, 10, 'star', ['#ef4444', '#fecdd3', '#e11d48']);
+              
+              // Remove the parent expanding knife
+              knivesRef.current.splice(i, 1);
+              continue;
+            }
+          } else {
+            // Standard falling & homing
+            k.x += k.vx;
+            k.y += k.vy;
+          }
+
+          // Leave tiny glitters or smoke trails behind knives
+          if (Math.random() < 0.15) {
+            particlesRef.current.push({
+              x: k.x,
+              y: k.y,
+              vx: -k.vx * 0.1,
+              vy: -k.vy * 0.1,
+              size: Math.random() * 2 + 1,
+              alpha: 0.6,
+              color: k.glow ? 'rgba(239, 68, 68, 0.5)' : 'rgba(148, 163, 184, 0.4)',
+              type: 'circle',
+              decay: 0.05
+            });
+          }
+
+          // Remove out-of-screen knives
+          if (k.y > canvasHeight + 40 || k.y < -60 || k.x < -40 || k.x > canvasWidth + 40) {
+            knivesRef.current.splice(i, 1);
+            continue;
+          }
+
+          // 5. Collision Check (Small precise player hitbox!)
+          const distToPlayer = Math.hypot(k.x - player.x, k.y - player.y);
+          const collisionRadius = player.hitRadius + (k.size * 0.6); // slight hit box scale padding
+          if (distToPlayer < collisionRadius) {
+            // Hit! Game Over triggered!
+            cancelAnimationFrame(animId);
+            triggerGameOver();
+            return;
+          }
+        }
+
+        // 6. Update Particles
+        for (let i = particlesRef.current.length - 1; i >= 0; i--) {
+          const p = particlesRef.current[i];
+          p.x += p.vx;
+          p.y += p.vy;
+          p.alpha -= p.decay;
+          if (p.alpha <= 0) {
+            particlesRef.current.splice(i, 1);
+          }
         }
       }
 
@@ -1314,14 +1364,23 @@ export default function App() {
                         </div>
                       </div>
 
-                      <button
-                        id="retry-game-btn"
-                        onClick={startGame}
-                        className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold py-3 rounded-xl shadow-lg hover:shadow-rose-600/30 cursor-pointer text-sm tracking-wider"
-                      >
-                        <RotateCcw className="w-4 h-4" />
-                        もう一度挑戦する（愛から逃げる）
-                      </button>
+                      <div className="space-y-2 w-full">
+                        <button
+                          id="retry-game-btn"
+                          onClick={startGame}
+                          className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold py-3 rounded-xl shadow-lg hover:shadow-rose-600/30 cursor-pointer text-sm tracking-wider animate-pulse"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                          もう一度挑戦する（愛から逃げる）
+                        </button>
+                        <button
+                          id="back-to-title-btn"
+                          onClick={() => setGameStatus('start')}
+                          className="w-full flex items-center justify-center gap-2 bg-neutral-900/60 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 font-bold py-3 rounded-xl cursor-pointer text-xs tracking-wider transition-all duration-150"
+                        >
+                          タイトルに戻る
+                        </button>
+                      </div>
                     </div>
                   </motion.div>
                 )}
@@ -1367,14 +1426,23 @@ export default function App() {
                         </div>
                       </div>
 
-                      <button
-                        id="restart-clear-btn"
-                        onClick={startGame}
-                        className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-neutral-950 font-extrabold py-3 rounded-xl shadow-lg cursor-pointer text-sm"
-                      >
-                        <RotateCcw className="w-4 h-4 text-neutral-950" />
-                        もう一度遊ぶ（さらなる深淵へ）
-                      </button>
+                      <div className="space-y-2 w-full">
+                        <button
+                          id="restart-clear-btn"
+                          onClick={startGame}
+                          className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-neutral-950 font-extrabold py-3 rounded-xl shadow-lg cursor-pointer text-sm font-bold"
+                        >
+                          <RotateCcw className="w-4 h-4 text-neutral-950" />
+                          もう一度遊ぶ（さらなる深淵へ）
+                        </button>
+                        <button
+                          id="clear-back-to-title-btn"
+                          onClick={() => setGameStatus('start')}
+                          className="w-full flex items-center justify-center gap-2 bg-neutral-950 hover:bg-neutral-900 border border-neutral-800/80 text-neutral-300 font-bold py-3 rounded-xl cursor-pointer text-xs tracking-wider transition-all duration-150"
+                        >
+                          タイトルに戻る
+                        </button>
+                      </div>
                     </div>
                   </motion.div>
                 )}
